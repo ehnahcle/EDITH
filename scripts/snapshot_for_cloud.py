@@ -22,7 +22,7 @@ sys.path.insert(0, str(ROOT))
 import pandas as pd
 
 from edith.data_loader import get_index
-from edith.regime import kospi_regime
+from edith.regime import kospi_regime, kospi_regime_3tier
 
 START = "2020-01-01"
 END = datetime.today().strftime("%Y-%m-%d")
@@ -32,7 +32,7 @@ RESULTS = ROOT / "results"
 def main() -> None:
     print(f"== Snapshot {START} -> {END} ==")
 
-    # 1. Regime series
+    # 1. Legacy 2-tier regime series (for backward compat with old dashboard)
     regime = kospi_regime(START, END)
     if regime.empty:
         print("  ! Could not fetch regime")
@@ -41,7 +41,16 @@ def main() -> None:
         on = int(regime.sum())
         print(f"  ✓ regime_series.csv  ({on}/{len(regime)} ON)")
 
-    # 2. KOSPI buy-and-hold benchmark
+    # 2. NEW 3-tier regime series (used by Triple-mode dispatcher)
+    regime3 = kospi_regime_3tier(START, END)
+    if regime3.empty:
+        print("  ! Could not fetch 3-tier regime")
+    else:
+        pd.DataFrame({"regime3": regime3}).to_csv(RESULTS / "regime3_series.csv")
+        counts = regime3.value_counts()
+        print(f"  ✓ regime3_series.csv  ({dict(counts)})")
+
+    # 3. KOSPI buy-and-hold benchmark
     idx = get_index("KS11", START, END)
     if idx.empty:
         print("  ! Could not fetch KOSPI index")

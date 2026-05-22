@@ -184,12 +184,58 @@ def _load_latest_cached_signals() -> tuple[pd.DataFrame, str | None]:
 
 
 def _load_cached_regime_series() -> pd.Series:
-    """Build a regime series from cached KOSPI index pkl or a committed CSV."""
+    """Legacy 2-tier regime (bool) for backward compatibility."""
     p_reg = RESULTS_DIR / "regime_series.csv"
     if p_reg.exists():
         s = pd.read_csv(p_reg, index_col=0, parse_dates=True)["regime"].astype(bool)
         return s
     return pd.Series(dtype=bool)
+
+
+def _load_cached_regime3_series() -> pd.Series:
+    """3-tier regime (STRONG_BULL / WEAK / BEAR) for Triple-mode dispatcher."""
+    p_reg = RESULTS_DIR / "regime3_series.csv"
+    if p_reg.exists():
+        s = pd.read_csv(p_reg, index_col=0, parse_dates=True)["regime3"].astype(str)
+        return s
+    return pd.Series(dtype=object)
+
+
+REGIME3_INFO = {
+    "STRONG_BULL": {
+        "color": "#22c55e",
+        "emoji": "🟢",
+        "label": "STRONG_BULL",
+        "korean": "강한 추세장",
+        "strategy": "Momentum5",
+        "rule": "5일 +10% 모멘텀 매수",
+        "stop": "−3%",
+        "target": "+15%",
+        "hold": "7거래일",
+    },
+    "WEAK": {
+        "color": "#f59e0b",
+        "emoji": "🟡",
+        "label": "WEAK",
+        "korean": "박스권 / 약한 추세장",
+        "strategy": "NewHigh52w",
+        "rule": "52주 신고가 돌파 매수 (메인 알파)",
+        "stop": "−7%",
+        "target": "+20%",
+        "hold": "10거래일",
+    },
+    "BEAR": {
+        "color": "#ef4444",
+        "emoji": "🔴",
+        "label": "BEAR",
+        "korean": "약세장",
+        "strategy": "Disparity",
+        "rule": "이격도 -10% 단기 반등 매수 (방어적)",
+        "stop": "−3%",
+        "target": "+10%",
+        "hold": "3거래일",
+    },
+}
 
 
 @st.cache_data(ttl=60 * 5)
@@ -348,67 +394,118 @@ if page == "Today's Signals":
         st.warning("저장된 시그널이 없습니다. 로컬에서 `edith` 명령을 실행해 시그널을 생성하고 GitHub에 push하세요.")
         st.stop()
 
-    if regime_series is None or (isinstance(regime_series, pd.Series) and regime_series.empty):
-        if sig_df is None or sig_df.empty:
-            st.error("시그널 데이터 없음. `edith` 실행 후 push 필요.")
-            st.stop()
-        regime_today = True  # assume bullish if signal exists in cache (gate already applied)
+    # ---- 3-tier regime display ----
+    regime3 = _load_cached_regime3_series()
+    today_reg3 = "UNKNOWN"
+    if not regime3.empty:
+        today_reg3 = str(regime3.iloc[-1])
+    elif sig_df is not None and not sig_df.empty and "regime" in sig_df.columns:
+        # signals_*.csv contains a 'regime' column for each candidate
+        today_reg3 = str(sig_df["regime"].iloc[0])
 
+    info = REGIME3_INFO.get(today_reg3, {
+        "color": "#6b7280", "emoji": "⚪", "label": "UNKNOWN",
+        "korean": "분류 불가", "strategy": "—",
+        "rule": "—", "stop": "—", "target": "—", "hold": "—",
+    })
+
+    # Headline card
+    st.markdown(
+        f"<div style='padding:1rem; border-radius:0.5rem; "
+        f"background:{info['color']}22; border-left:4px solid {info['color']};'>"
+        f"<div style='font-size:1.3rem; font-weight:600;'>"
+        f"{info['emoji']} {info['label']} — {info['korean']}</div>"
+        f"<div style='margin-top:0.5rem; font-size:0.95rem; color:#a3a3a3;'>"
+        f"오늘 활성 전략: <b>{info['strategy']}</b> · {info['rule']}<br>"
+        f"손절 {info['stop']} / 익절 {info['target']} / 최대보유 {info['hold']}"
+        f"</div></div>",
+        unsafe_allow_html=True,
+    )
+    st.write("")
+
+    # Metric row
     c1, c2, c3 = st.columns(3)
     with c1:
-        if regime_today:
-            st.success("🟢 **KOSPI Regime: BULLISH**\n\nNew entries allowed.")
-        else:
-            st.warning("🔴 **KOSPI Regime: BEARISH**\n\nNo new entries today.")
-    with c2:
-        on_days = int(regime_series.iloc[-60:].sum())
-        st.metric("Regime ON (last 60d)", f"{on_days}/60")
-    with c3:
         st.metric("Capital / slot", f"{capital/top_n:,.0f} KRW")
+    with c2:
+        if not regime3.empty:
+            last_60 = regime3.iloc[-60:]
+            bull_d = int((last_60 == "STRONG_BULL").sum())
+            weak_d = int((last_60 == "WEAK").sum())
+            bear_d = int((last_60 == "BEAR").sum())
+            st.metric("최근 60일 분포",
+                      f"🟢{bull_d}  🟡{weak_d}  🔴{bear_d}")
+    with c3:
+        # Backward-compat legacy bullish flag if we ended up here without regime3
+        if not regime3.empty:
+            bull_today = today_reg3 == "STRONG_BULL"
+            st.metric("거래 가능?",
+                      "예 (적극)" if bull_today else
+                      "예 (제한)" if today_reg3 != "BEAR" else
+                      "방어적")
 
-    st.markdown("##### KOSPI Regime — last 60 days")
-    last60 = regime_series.iloc[-60:].astype(int)
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=last60.index, y=last60.values,
-        mode="lines", fill="tozeroy", line=dict(color="#3b82f6", width=1.5),
-        hovertemplate="%{x|%Y-%m-%d}: %{y}<extra></extra>",
-    ))
-    fig.update_layout(
-        height=120, margin=dict(l=10, r=10, t=10, b=10),
-        yaxis=dict(tickvals=[0, 1], ticktext=["OFF", "ON"], range=[-0.1, 1.1]),
-        xaxis_title="", showlegend=False,
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    # 3-tier regime ribbon
+    if not regime3.empty:
+        st.markdown("##### KOSPI 환경 — 최근 60일")
+        last60 = regime3.iloc[-60:]
+        color_map = {"STRONG_BULL": 2, "WEAK": 1, "BEAR": 0}
+        ys = last60.map(color_map).values
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=last60.index, y=ys, mode="markers",
+            marker=dict(
+                size=10,
+                color=[REGIME3_INFO[r]["color"] for r in last60.values],
+                line=dict(width=0),
+            ),
+            hovertext=last60.values, hoverinfo="x+text",
+        ))
+        fig.update_layout(
+            height=130, margin=dict(l=10, r=10, t=10, b=10),
+            yaxis=dict(tickvals=[0, 1, 2],
+                       ticktext=["🔴 BEAR", "🟡 WEAK", "🟢 BULL"],
+                       range=[-0.5, 2.5]),
+            xaxis_title="", showlegend=False,
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
-    if not regime_today:
-        st.info("Regime gate is OFF — strategy is dormant. Existing positions still managed manually.")
-        st.stop()
+    if today_reg3 == "BEAR":
+        st.info(
+            "🔴 BEAR 모드: 방어적 단기 반등(Disparity) 신호만 가동. "
+            "신호 개수 적은 게 정상. 자본 대부분 현금 유지."
+        )
 
     if sig_df is None or sig_df.empty:
-        st.info("No entry signals today even though regime is bullish.")
+        st.info(f"오늘은 진입 신호가 없습니다 ({info['label']} 환경, {info['strategy']} 룰).")
         st.stop()
 
     st.markdown(f"##### {len(sig_df)} entry candidate(s) — order at next session's OPEN")
 
     show = sig_df.copy()
     show["close"] = show["close"].map(lambda x: f"{x:,.0f}")
-    show["ret5d"] = show["ret5d"].map(lambda x: f"{x*100:.2f}%")
+    # signals_*.csv may use 'score' (new) or 'ret5d' (legacy)
+    score_col = "score" if "score" in show.columns else "ret5d"
+    show[score_col] = show[score_col].map(lambda x: f"{x*100:.2f}%" if abs(x) < 100 else f"{x:.2f}")
     show["alloc_krw"] = show["alloc_krw"].map(lambda x: f"{x:,.0f}")
     show["stop_price"] = show["stop_price"].map(lambda x: f"{x:,}")
     show["target_price"] = show["target_price"].map(lambda x: f"{x:,}")
-    show = show[[
-        "code", "name", "board", "close", "ret5d",
-        "shares", "alloc_krw", "stop_price", "target_price", "max_hold",
-    ]]
-    show.columns = ["코드", "종목명", "시장", "종가", "5일수익률",
-                    "매수주수", "배분(KRW)", "손절가", "목표가", "최대보유일"]
+    cols_to_show = [c for c in
+                    ["code", "name", "board", "close", score_col,
+                     "shares", "alloc_krw", "stop_price", "target_price", "max_hold"]
+                    if c in show.columns]
+    show = show[cols_to_show]
+    rename_map = {
+        "code": "코드", "name": "종목명", "board": "시장", "close": "종가",
+        "score": "신호점수", "ret5d": "5일수익률",
+        "shares": "매수주수", "alloc_krw": "배분(KRW)",
+        "stop_price": "손절가", "target_price": "목표가", "max_hold": "최대보유일",
+    }
+    show.columns = [rename_map.get(c, c) for c in show.columns]
     st.dataframe(show, use_container_width=True, hide_index=True)
 
     st.caption(
-        f"진입: 다음 거래일 시가 매수.  손절 -{FINAL_PARAMS_MOMENTUM['stop_pct']*100:.0f}% / "
-        f"목표 +{FINAL_PARAMS_MOMENTUM['target_pct']*100:.0f}% / "
-        f"최대 보유 {FINAL_PARAMS_MOMENTUM['max_hold']}거래일."
+        f"진입: 다음 거래일 시가 매수.  손절 {info['stop']} / 목표 {info['target']} / "
+        f"최대 보유 {info['hold']}. (현재 환경: **{info['label']}**, 전략: **{info['strategy']}**)"
     )
 
     csv = sig_df.to_csv(index=False).encode("utf-8-sig")
@@ -447,10 +544,34 @@ if page == "Today's Signals":
 # Page: Manual (실행 매뉴얼)
 # ============================================================
 elif page == "Manual":
-    st.subheader("📖 EDITH 실행 매뉴얼")
-    st.caption("매일 무엇을 어떻게 해야 하는지 단계별 가이드. 휴대폰에서 자주 펼쳐보세요.")
+    st.subheader("📖 EDITH 실행 매뉴얼 (Triple-Mode)")
+    st.caption("매일 무엇을 어떻게 해야 하는지. KOSPI 환경(STRONG_BULL / WEAK / BEAR)에 따라 자동으로 다른 전략이 활성화됩니다.")
 
-    with st.expander("🕐 1. 주간 시간표 (월~금)", expanded=True):
+    with st.expander("🎯 0. Triple-Mode란? — 환경별 다른 전략", expanded=True):
+        st.markdown("""
+EDITH는 매일 KOSPI 환경을 자동 진단해 **3가지 모드 중 하나**를 활성화합니다.
+환경마다 **손절/익절/보유일이 다르므로** Today's Signals에 표시된 값을 그대로 따르세요.
+
+| 환경 | 활성 전략 | 진입 조건 | 손절 | 익절 | 보유 |
+|---|---|---|---|---|---|
+| 🟢 **STRONG_BULL**<br>강한 추세장 | Momentum5 | 5일 +10% 모멘텀 | −3% | +15% | 7거래일 |
+| 🟡 **WEAK** ⭐<br>박스권/약추세 | NewHigh52w | 52주 신고가 돌파 | −7% | +20% | 10거래일 |
+| 🔴 **BEAR**<br>약세장 | Disparity | 이격도 -10% 단기반등 | −3% | +10% | 3거래일 |
+
+**검증 (2010-2024 15년):** CAGR 14.6% / Sharpe 0.72 / MDD −28%  (vs KOSPI: 2.3% / 0.23 / −44%)
+
+**환경 판별 기준 (KOSPI 일봉):**
+- STRONG_BULL: Close > SMA200 AND SMA50 > SMA200 AND SMA50 20일 기울기 > 2% AND 60일 ROC > 3%
+- BEAR: Close < SMA200 OR SMA50 < SMA200
+- WEAK: 그 외 모든 경우
+
+**가장 중요한 변화:**
+- 박스권 9년(2010-2018) 시기 Legacy 전략: CAGR **−17.5%** (자본 -60% 손실)
+- Triple-mode: CAGR **+10.8%** (자본 +64%) ✅
+- 박스권에서 NewHigh52w가 진짜 알파 원천
+""")
+
+    with st.expander("🕐 1. 주간 시간표 (월~금)", expanded=False):
         st.markdown("""
 | 시간 (KST) | 할 일 | 어디서 |
 |---|---|---|
@@ -501,25 +622,34 @@ EDITH 자본을 **균등 분할**해서 **신호 종목 모두에 매수**합니
 - **갭 회피 룰**: 시가가 전일 종가 대비 **+5% 이상 갭업**이면 그 종목은 매수 취소
 """)
 
-    with st.expander("🛡️ 3. 손절가 / 익절가 자동 계산"):
+    with st.expander("🛡️ 3. 손절가 / 익절가 자동 계산 (환경별)"):
         st.markdown("""
-**규칙 (모든 종목 공통):**
-- 손절가 = 진입가 × **0.97** (-3%)
-- 익절가 = 진입가 × **1.15** (+15%)
-- 시간 청산 = **5거래일** 보유 후 종가에 무조건 매도
+**환경에 따라 다른 룰** — Today's Signals 페이지에서 오늘의 환경을 먼저 확인하세요.
 
-매수 직후 **반드시 OCO 주문 등록**. 매도 두 개 (손절 + 익절) 중 하나 체결되면 다른 하나 자동 취소.
+| 환경 | 손절 | 익절 | 보유 |
+|---|---|---|---|
+| 🟢 STRONG_BULL | −3% | +15% | 7거래일 |
+| 🟡 WEAK | −7% | +20% | 10거래일 |
+| 🔴 BEAR | −3% | +10% | 3거래일 |
+
+매수 직후 **반드시 OCO 매도 주문 등록**. 매도 두 개(손절+익절) 중 하나 체결되면 다른 하나 자동 취소.
 
 ---
 
-**📱 가격 계산기 (진입가 입력 → 손절/익절가 자동 계산):**
+**📱 가격 계산기 (환경 + 진입가 + 주수 입력):**
 """)
-        col1, col2 = st.columns(2)
+        col0, col1, col2 = st.columns(3)
+        with col0:
+            calc_regime = st.selectbox(
+                "환경",
+                options=["STRONG_BULL", "WEAK", "BEAR"],
+                index=0,
+                help="Today's Signals 페이지에서 본 오늘의 환경",
+            )
         with col1:
             entry_price = st.number_input(
                 "진입가 (KRW)",
                 min_value=1, max_value=10_000_000, value=100_000, step=100,
-                help="HTS에서 체결된 실제 매수 단가를 입력",
             )
         with col2:
             num_shares = st.number_input(
@@ -527,21 +657,26 @@ EDITH 자본을 **균등 분할**해서 **신호 종목 모두에 매수**합니
                 min_value=1, max_value=100_000, value=20, step=1,
             )
 
-        stop_price = int(round(entry_price * 0.97))
-        target_price = int(round(entry_price * 1.15))
+        regime_params = {
+            "STRONG_BULL": (0.03, 0.15, 7),
+            "WEAK":        (0.07, 0.20, 10),
+            "BEAR":        (0.03, 0.10, 3),
+        }
+        stop_p, target_p, hold_d = regime_params[calc_regime]
+        stop_price = int(round(entry_price * (1 - stop_p)))
+        target_price = int(round(entry_price * (1 + target_p)))
         invest = entry_price * num_shares
         max_loss = (stop_price - entry_price) * num_shares
         max_gain = (target_price - entry_price) * num_shares
 
         c1, c2, c3 = st.columns(3)
         c1.metric("💰 투자 금액", f"{invest:,} KRW")
-        c2.metric("🔻 손절가 (-3%)", f"{stop_price:,}", f"{max_loss:,} KRW")
-        c3.metric("🎯 익절가 (+15%)", f"{target_price:,}", f"+{max_gain:,} KRW")
-
+        c2.metric(f"🔻 손절가 (-{stop_p*100:.0f}%)", f"{stop_price:,}", f"{max_loss:,} KRW")
+        c3.metric(f"🎯 익절가 (+{target_p*100:.0f}%)", f"{target_price:,}", f"+{max_gain:,} KRW")
         st.caption(
-            "위 손절가 / 익절가를 HTS의 OCO 매도 주문에 그대로 입력. "
-            "수수료·세금·슬리피지는 백테스트에서 차감된 상태로 계산되므로, "
-            "실제 P&L은 위 금액에서 약 0.42% 비용 차감 후."
+            f"위 손절가 / 익절가를 HTS의 OCO 매도 주문에 그대로 입력. "
+            f"보유 기간 안에 둘 다 안 맞으면 **{hold_d}거래일째 종가에 시장가 청산** (시간 청산). "
+            "실제 P&L은 약 0.42% 비용 차감 후."
         )
 
     with st.expander("📲 4. 주문 종류 정리 — 예약매수 vs OCO매도"):
