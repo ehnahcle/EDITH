@@ -30,8 +30,10 @@ sys.path.insert(0, str(ROOT))
 import pandas as pd
 
 from edith.data_loader import get_top_universe, get_ohlcv_batch
+from edith.investor_flow import get_investor_flow_batch
 from edith.regime import kospi_regime_3tier, STRONG_BULL, WEAK, BEAR
 from edith.final_strategy import make_dispatcher, params_for_regime
+from edith.filters import make_foreign_score_booster
 
 
 N_KOSPI = 100
@@ -94,8 +96,28 @@ def main() -> None:
     board_map = dict(zip(uni["Code"], uni["Board"]))
     data = get_ohlcv_batch(uni["Code"].tolist(), start, end, force=args.force)
 
-    # 3. Run dispatcher on latest bar of each ticker
-    dispatcher = make_dispatcher(regime3, enable_bear=not args.no_bear)
+    # 3a. Fetch foreign-net-buy flows for the universe (incremental — cache hits
+    #     most of the time). Used as a per-regime score booster on WEAK entries.
+    #     Falls back to no-booster mode if KRX credentials are unset / fetch fails.
+    flows = {}
+    booster_per_regime = {}
+    try:
+        flows = get_investor_flow_batch(uni["Code"].tolist(), start, end, sleep=0.1)
+        if flows:
+            booster = make_foreign_score_booster(flows, lookback=5, zscore_window=60, weight=0.5)
+            booster_per_regime = {WEAK: booster}
+            print(f"  Foreign-flow booster active on WEAK regime ({len(flows)} tickers).")
+        else:
+            print("  WARN: no foreign-flow data — booster disabled.")
+    except Exception as e:  # noqa: BLE001
+        print(f"  WARN: foreign-flow fetch failed ({e}) — booster disabled.")
+
+    # 3b. Run dispatcher on latest bar of each ticker
+    dispatcher = make_dispatcher(
+        regime3,
+        enable_bear=not args.no_bear,
+        score_booster_per_regime=booster_per_regime,
+    )
     candidates = []
     for code, df in data.items():
         if len(df) < 30:

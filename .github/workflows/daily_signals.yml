@@ -31,6 +31,8 @@ jobs:
       - name: Generate signals
         env:
           EDITH_CAPITAL: ${{ vars.EDITH_CAPITAL || '10000000' }}
+          KRX_ID: ${{ secrets.KRX_ID }}
+          KRX_PW: ${{ secrets.KRX_PW }}
         run: |
           python scripts/daily_signal.py --capital "$EDITH_CAPITAL"
 

@@ -38,14 +38,23 @@
 
 | 항목 | OK 기준 | NG일 때 |
 |---|---|---|
-| **KOSPI 레짐** | Bullish (대시보드 상단 🟢) | **신규 매수 금지**. 보유분만 관리 |
+| **KOSPI 3-tier 레짐** | 🟢 STRONG_BULL / 🟡 WEAK / 🔴 BEAR 중 하나 | 신호 자체가 안 나오면 그 날 매수 안 함 |
 | **신호 종목 수** | 1개 이상 | 신호 없음 → 그 날 매수 안 함 |
+
+레짐별로 적용되는 sub-strategy가 다릅니다 (dispatcher 자동 선택):
+- 🟢 **STRONG_BULL**: Momentum5 (ret≥10%, stop -3% / target +15% / 7d)
+- 🟡 **WEAK**: NewHigh52w (52주 신고가, stop -7% / target +20% / 10d) + **외국인 score booster 활성**
+- 🔴 **BEAR**: Disparity (-10% SMA20, stop -3% / target +10% / 3d) — 방어용, 짧은 hold
 
 ### 2.2 매수 종목 선정
 
 - 대시보드 **Today's Signals** 페이지의 후보 리스트가 곧 매수 대상.
-- 자동 우선순위: **5일 수익률(`ret5d`)이 큰 순서**로 상위 5개까지.
+- 자동 우선순위 (`score` 컬럼 내림차순) 상위 5개:
+  - STRONG_BULL: **5일 수익률(`ret5d`)** 큰 순
+  - WEAK: **52주 신고가 돌파율** + **외국인 5일 누적 순매수 z-score**(60d 윈도우, weight 0.5)
+  - BEAR: 디스파리티(이격도) 음수 큰 순
 - 신호가 5개 미만이면 그 수만큼만 매수. 나머지 현금은 다음 날 대기.
+- WEAK 레짐에서 외국인 데이터 미수신 시 booster 비활성 → 순수 신고가 돌파율만으로 정렬 (graceful fallback, 시그널은 정상 생성)
 
 ### 2.3 매수 방법
 
@@ -120,16 +129,17 @@
 
 ---
 
-## 4. 약세장 대처 (KOSPI 레짐 OFF)
+## 4. 약세장 대처 (KOSPI 🔴 BEAR 레짐)
 
-대시보드 상단이 🔴 BEARISH로 바뀌면:
+대시보드 상단이 🔴 BEAR로 바뀌면:
 
-1. **신규 매수 즉시 중단.** 새 시그널은 무시.
-2. **기존 보유 포지션은 그대로 관리.** 손절/익절/시간청산 룰 그대로 적용.
-3. 모든 포지션 청산 후에는 EDITH는 사실상 **휴면 상태**가 됨.
-4. 레짐이 다시 🟢로 바뀌면 자동으로 신호 발생 재개.
+1. dispatcher가 자동으로 **Disparity sub-strategy로 전환** (이격도 -10%에서 짧은 mean-rev). 방어 전용이라 거래 빈도 낮음.
+2. 기존 보유 포지션은 룰대로 관리 (손절/익절/시간청산).
+3. BEAR에서는 신규 매수가 거의 안 일어남 — Disparity는 신호 자체가 드물고 hold도 3일로 짧음.
+4. `--no-bear` 옵션으로 dispatcher 호출하면 BEAR에서 완전 휴면 가능 (보수적 모드).
+5. 레짐이 🟡 WEAK 또는 🟢 STRONG_BULL으로 바뀌면 자동으로 메인 알파 sub-strategy 재개.
 
-> 2022년 KOSPI -25% 시기 EDITH는 거래 0건 (자동 회피). MDD -27%로 방어된 가장 큰 이유.
+> 2022년 KOSPI -25% 시기 baseline은 거래 0건 (자동 회피). MDD -27%로 방어된 가장 큰 이유.
 
 ---
 
@@ -214,6 +224,26 @@ Round-trip ≈   0.42%
 
 ---
 
+## 8.5 외인 booster — 데이터 의존성과 fallback 동작
+
+WEAK 박스권 레짐에서 동시 후보 5개 중 어느 것을 채울지 결정하는 데 **외국인 5일 누적 순매수 z-score**를 사용 (60d 윈도우, weight 0.5, clip ±2).
+
+**데이터 소스:** pykrx → data.krx.co.kr. `KRX_ID`/`KRX_PW` 환경변수 필요 (https://data.krx.co.kr 무료 회원가입).
+- 로컬: `~/.zshrc`에 export 두 줄
+- GitHub Actions: repo Secrets에 `KRX_ID`, `KRX_PW` 등록
+
+**캐시:** `data/cache_investor/*.pkl` (16MB, 24h TTL). 매일 daily_signal은 cache hit이라 추가 fetch 거의 없음.
+**최초 1회:** `scripts/backfill_investor_flow.py` 실행 (~50분, 14년 × 150종목).
+
+**Fallback:** KRX 로그인 실패 / 네트워크 에러 / 자격증명 없음 → booster 자동 비활성, daily_signal은 baseline ranking으로 정상 작동. 로그에 `"WARN: foreign-flow fetch failed ... booster disabled"` 확인 가능. 시그널 손실 없음.
+
+**알파 기여 (2010-2024 walk-forward):**
+- FULL Sharpe 0.72 → 0.96 (+33%)
+- 2024 약세 OOS Sharpe 0.34 → 0.86 (가장 큰 약점이 가장 크게 개선)
+- WEAK regime에만 적용 — STRONG_BULL/BEAR에는 적용 X (오히려 악화)
+
+---
+
 ## 9. 기록 / 백테스트 검증
 
 - 매일 시그널은 `results/signals_YYYY-MM-DD.csv`에 자동 저장.
@@ -225,6 +255,7 @@ Round-trip ≈   0.42%
 ## 10. 한계 / 면책
 
 - EDITH는 **백테스트 기반 통계 모델**입니다. 미래 수익을 보장하지 않습니다.
-- 2022년 약세장 외에 **2008 금융위기, 2020 코로나** 같은 극단 이벤트는 검증 데이터에 없거나 일부만 포함됩니다.
+- 14년(2010-2024) walk-forward 검증을 통과했지만 **2008 금융위기, 2020 코로나** 같은 극단 이벤트는 검증 데이터에 없거나 일부만 포함됩니다.
 - 한국 시장 특수 룰 (거래정지, 우선주 권리락, 액면분할 등)은 일봉 데이터로 완벽히 잡히지 않습니다.
+- **외부 데이터 의존성:** FinanceDataReader (OHLCV) + pykrx/KRX (외인 데이터). 둘 중 하나가 장기 다운되면 시그널 생성 지연. KRX는 graceful fallback으로 booster만 비활성화 가능.
 - 본인 책임 하에 운영하시고, **EDITH 자본은 잃어도 생활에 지장 없는 금액**으로 한정하세요.

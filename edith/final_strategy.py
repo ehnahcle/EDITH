@@ -97,7 +97,12 @@ def ensemble_strategy(code: str, df: pd.DataFrame) -> pd.DataFrame:
 # New: 3-mode dispatcher
 # ---------------------------------------------------------------------------
 
-def make_dispatcher(regime3: pd.Series, enable_bear: bool = True):
+def make_dispatcher(
+    regime3: pd.Series,
+    enable_bear: bool = True,
+    filter_per_regime: dict | None = None,
+    score_booster_per_regime: dict | None = None,
+):
     """Return a signal_fn(code, df) that selects the per-regime sub-strategy
     based on the value of `regime3` on each date.
 
@@ -106,8 +111,36 @@ def make_dispatcher(regime3: pd.Series, enable_bear: bool = True):
 
     enable_bear: if False, the BEAR regime stays dormant (no entries).
                  Set False for the cautious profile (mainly STRONG_BULL+WEAK).
+
+    filter_per_regime: optional dict mapping regime label → filter_fn(code, df).
+                       Each filter_fn returns a bool Series aligned to df.index;
+                       the per-regime entry mask is ANDed with it. Use this to
+                       gate a single regime (e.g. only filter WEAK entries by
+                       foreign net buying) without touching the other regimes.
+
+    score_booster_per_regime: optional dict mapping regime label → booster_fn(code, df).
+                       Each booster_fn returns a float Series aligned to df.index;
+                       this is ADDED to the score column for the regime's entries.
+                       Used to re-rank simultaneous candidates (engine fills only
+                       max_positions slots, so score ordering is decisive).
     """
     regime3 = regime3.copy()
+    filter_per_regime = filter_per_regime or {}
+    score_booster_per_regime = score_booster_per_regime or {}
+
+    def _apply_filter(regime_label: str, code: str, df: pd.DataFrame, mask: pd.Series) -> pd.Series:
+        f = filter_per_regime.get(regime_label)
+        if f is None:
+            return mask
+        allow = f(code, df).reindex(df.index).fillna(False)
+        return mask & allow
+
+    def _boost(regime_label: str, code: str, df: pd.DataFrame, base_score: pd.Series) -> pd.Series:
+        b = score_booster_per_regime.get(regime_label)
+        if b is None:
+            return base_score
+        adj = b(code, df).reindex(df.index).fillna(0.0)
+        return base_score + adj
 
     def _dispatch(code: str, df: pd.DataFrame) -> pd.DataFrame:
         # Build all 3 sub-signals upfront, then mask by regime.
@@ -127,32 +160,35 @@ def make_dispatcher(regime3: pd.Series, enable_bear: bool = True):
         out["score"] = 0.0
 
         # STRONG_BULL → momentum
-        m_bull = (reg == STRONG_BULL) & sig_m["entry"]
+        m_bull = _apply_filter(STRONG_BULL, code, df, (reg == STRONG_BULL) & sig_m["entry"])
         if m_bull.any():
             out.loc[m_bull, "entry"] = True
             out.loc[m_bull, "stop_pct"] = PARAMS_STRONG_BULL["stop_pct"]
             out.loc[m_bull, "target_pct"] = PARAMS_STRONG_BULL["target_pct"]
             out.loc[m_bull, "max_hold"] = PARAMS_STRONG_BULL["max_hold"]
-            out.loc[m_bull, "score"] = sig_m.loc[m_bull, "score"]
+            boosted = _boost(STRONG_BULL, code, df, sig_m["score"])
+            out.loc[m_bull, "score"] = boosted.loc[m_bull]
 
         # WEAK → new high 52w
-        m_weak = (reg == WEAK) & sig_n["entry"]
+        m_weak = _apply_filter(WEAK, code, df, (reg == WEAK) & sig_n["entry"])
         if m_weak.any():
             out.loc[m_weak, "entry"] = True
             out.loc[m_weak, "stop_pct"] = PARAMS_WEAK["stop_pct"]
             out.loc[m_weak, "target_pct"] = PARAMS_WEAK["target_pct"]
             out.loc[m_weak, "max_hold"] = PARAMS_WEAK["max_hold"]
-            out.loc[m_weak, "score"] = sig_n.loc[m_weak, "score"]
+            boosted = _boost(WEAK, code, df, sig_n["score"])
+            out.loc[m_weak, "score"] = boosted.loc[m_weak]
 
         # BEAR → disparity (optional)
         if enable_bear:
-            m_bear = (reg == BEAR) & sig_d["entry"]
+            m_bear = _apply_filter(BEAR, code, df, (reg == BEAR) & sig_d["entry"])
             if m_bear.any():
                 out.loc[m_bear, "entry"] = True
                 out.loc[m_bear, "stop_pct"] = PARAMS_BEAR["stop_pct"]
                 out.loc[m_bear, "target_pct"] = PARAMS_BEAR["target_pct"]
                 out.loc[m_bear, "max_hold"] = PARAMS_BEAR["max_hold"]
-                out.loc[m_bear, "score"] = sig_d.loc[m_bear, "score"]
+                boosted = _boost(BEAR, code, df, sig_d["score"])
+                out.loc[m_bear, "score"] = boosted.loc[m_bear]
 
         return out
 

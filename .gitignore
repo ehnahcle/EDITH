@@ -8,7 +8,11 @@ venv/
 
 # Data cache (re-downloadable, large)
 data/cache/
+data/cache_investor/
 *.pkl
+
+# Local logs (backfill / validation runs)
+logs/
 
 # OS
 .DS_Store

@@ -45,13 +45,19 @@ git push -u origin main
 이미 `.github/workflows/daily_signals.yml` 파일이 있습니다. push 후 자동으로 활성화됨.
 
 매일 평일 **16:00 KST**에 GitHub 서버에서:
-- FinanceDataReader로 데이터 fetch
+- FinanceDataReader로 OHLCV fetch
+- pykrx로 외인·기관 일별 fetch (WEAK regime 시 booster용)
 - `daily_signal.py` 실행
 - `results/signals_YYYY-MM-DD.csv` 커밋 + push
 
-GitHub repo의 **Settings → Variables → Actions**에 `EDITH_CAPITAL` 변수를 추가하면 자본금 조정 가능 (기본 10,000,000).
+**필수 GitHub repo 설정:**
+1. **Settings → Secrets and variables → Actions → Secrets** 에 두 개 등록:
+   - `KRX_ID` : data.krx.co.kr 회원ID
+   - `KRX_PW` : 비밀번호
+   - 없어도 워크플로는 동작하지만 외인 booster 비활성 → alpha 손실
+2. **Settings → Variables → Actions** (선택)에 `EDITH_CAPITAL` 변수 추가하면 자본금 조정 가능 (기본 10,000,000)
 
-> 한국 KRX 사이트가 외국 IP를 차단할 가능성이 있습니다. FinanceDataReader가 어떤 백엔드를 쓰느냐에 따라 GitHub Actions(미국 IP)에서 실패할 수 있음. 실패 시 옵션 2로.
+> 한국 KRX 사이트가 외국 IP를 차단할 가능성이 있습니다. GitHub Actions(미국 IP)에서 pykrx 로그인이 실패할 수 있음 — 그 경우 daily_signal은 graceful fallback (booster 비활성, baseline 시그널만 생성). 완전 실패 시 옵션 2로 전환.
 
 **옵션 2: 로컬 launchd (macOS, 본인 컴퓨터에서 매일 실행)**
 
@@ -180,7 +186,13 @@ A. Streamlit Cloud는 무료 플랜에서 private repo 지원 제한적. 대안:
    - Vercel + FastAPI 같은 자체 호스팅
 
 **Q. GitHub Actions가 KRX 차단으로 실패한다.**
-A. 옵션 2 (launchd 로컬 자동 실행)로 전환. 본인 컴퓨터에서 실행 → push.
+A. 두 가지 영향이 분리됨:
+   - FDR (OHLCV) 실패 → daily_signal 자체가 안 돌아감. 옵션 2 (launchd 로컬 자동 실행)로 전환.
+   - pykrx (외인 데이터) 실패 → booster만 비활성, baseline 시그널은 정상 commit. 이 경우는 옵션 1 유지해도 됨.
+   - 로그에서 `"booster disabled"` 메시지로 부분 실패 식별 가능.
+
+**Q. KRX 키는 무료인가? 추가 비용 있나?**
+A. 완전 무료. data.krx.co.kr 회원가입만 하면 됨. 데이터 조회 자체에 quota나 요금 없음. pykrx가 알아서 세션을 1시간마다 갱신.
 
 **Q. 시그널이 외부에 노출되면 알파 사라질까?**
 A. 모멘텀 전략은 본질적으로 따라하기 어려움 (1주일 이내 청산, 종목 자주 바뀜). 다만 본인이 운용 중인 종목까지 공개되는 게 부담스러우면 Private repo + 로컬 실행 권장.
