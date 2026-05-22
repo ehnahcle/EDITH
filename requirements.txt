@@ -1,9 +1,9 @@
-# Minimal deps for the Streamlit Cloud deployment.
-# The cloud dashboard reads pre-committed CSVs (results/*.csv);
-# it does NOT need FinanceDataReader / pykrx at runtime.
-# For local development or CI cron, install requirements-full.txt instead.
+# Minimal deps for Streamlit Community Cloud.
+# Versions pinned to known-stable ranges (pandas 2.x; plotly 5.x).
+# The cloud dashboard reads pre-committed CSVs from results/; it does NOT
+# need finance-datareader / pykrx at runtime — those live in requirements-full.txt.
 
-streamlit>=1.30
-plotly>=5.18
-pandas>=2.0
-numpy>=1.24
+streamlit>=1.30,<2.0
+plotly>=5.18,<6.0
+pandas>=2.0,<3.0
+numpy>=1.24,<2.3
