@@ -24,9 +24,21 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from edith.regime import kospi_regime
 from edith.final_strategy import final_strategy, FINAL_PARAMS_MOMENTUM
 from edith.metrics import summarize
+
+
+def _lazy_kospi_regime(start: str, end: str) -> pd.Series:
+    """Lazy import so Streamlit Cloud doesn't crash when KRX libs are absent."""
+    try:
+        from edith.regime import kospi_regime
+        return kospi_regime(start, end)
+    except Exception:
+        return pd.Series(dtype=bool)
+
+
+# Backward-compatible name used elsewhere in this file
+kospi_regime = _lazy_kospi_regime
 
 
 RESULTS_DIR = ROOT / "results"

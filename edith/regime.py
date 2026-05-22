@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import pandas as pd
 
-from .data_loader import get_index
-
 
 def kospi_regime(start: str, end: str) -> pd.Series:
     """Return bool Series indexed by date: True when bullish regime active."""
+    # Lazy import so environments without FinanceDataReader/pykrx
+    # (e.g. Streamlit Cloud) can still import this module.
+    from .data_loader import get_index
+
     idx = get_index("KS11", start, end)
     if idx.empty:
         return pd.Series(dtype=bool)

@@ -1,13 +1,9 @@
-# Core data + analysis (used by local scripts; optional on Cloud)
-finance-datareader>=0.9.2
-pykrx>=1.0.45
-pandas>=2.0
-numpy>=1.24
-tqdm>=4.65
+# Minimal deps for the Streamlit Cloud deployment.
+# The cloud dashboard reads pre-committed CSVs (results/*.csv);
+# it does NOT need FinanceDataReader / pykrx at runtime.
+# For local development or CI cron, install requirements-full.txt instead.
 
-# Dashboard
 streamlit>=1.30
 plotly>=5.18
-
-# Plotting (used in some scripts; safe to keep)
-matplotlib>=3.7
+pandas>=2.0
+numpy>=1.24
