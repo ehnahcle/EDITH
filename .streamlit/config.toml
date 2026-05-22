@@ -1,0 +1,15 @@
+# EDITH dashboard config
+# JARVIS(quant_tool) uses the Streamlit default 8501.
+# We pin EDITH to 8511 so both can run side-by-side without conflict.
+
+[server]
+port = 8511
+headless = false
+runOnSave = false
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "dark"
+primaryColor = "#3b82f6"

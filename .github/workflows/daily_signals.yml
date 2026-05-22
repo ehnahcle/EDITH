@@ -1,0 +1,47 @@
+name: EDITH daily signals
+
+# 매일 평일 16:00 KST (= 07:00 UTC), KOSPI 장 마감 30분 후 실행
+on:
+  schedule:
+    - cron: "0 7 * * 1-5"
+  workflow_dispatch:  # GitHub UI에서 수동 실행 가능
+
+jobs:
+  signal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Generate signals
+        env:
+          EDITH_CAPITAL: ${{ vars.EDITH_CAPITAL || '10000000' }}
+        run: |
+          python scripts/daily_signal.py --capital "$EDITH_CAPITAL"
+
+      - name: Commit + push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add results/signals_*.csv || true
+          if git diff --cached --quiet; then
+            echo "No new signals to commit"
+          else
+            git commit -m "EDITH daily signals: $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git push
+          fi

@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+*.egg-info/
+
+# Data cache (re-downloadable, large)
+data/cache/
+*.pkl
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Streamlit secrets (real one). The .example file IS committed.
+.streamlit/secrets.toml
+!.streamlit/secrets.toml.example
+
+# Local environment
+.env
+
+# Per-user dashboard runtime logs
+/tmp/edith_dashboard.log
