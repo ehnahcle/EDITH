@@ -1,11 +1,11 @@
-# EDITH dashboard config
-# JARVIS(quant_tool) uses the Streamlit default 8501.
-# We pin EDITH to 8511 so both can run side-by-side without conflict.
-
-[server]
-port = 8511
-headless = false
-runOnSave = false
+# EDITH dashboard config — Streamlit Cloud safe.
+#
+# IMPORTANT: do NOT set [server].port here.  Streamlit Community Cloud
+# always serves on its own internal port (8501) and health-checks the same.
+# Setting a custom port here makes the Cloud think the app is dead
+# ("connection refused on http://localhost:8501/healthz").
+#
+# For local dev we pass --server.port 8511 from start_dashboard.sh instead.
 
 [browser]
 gatherUsageStats = false
