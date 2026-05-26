@@ -9,8 +9,22 @@
 set -e
 cd "$(dirname "$0")/.."
 
+# Load KRX_ID / KRX_PW (needed by pykrx investor-flow endpoint).
+# ~/.zshrc has them exported; sourcing here propagates to this bash process
+# even when invoked from a non-interactive parent (cron, CI, GUI launchers).
+if [ -f "$HOME/.zshrc" ]; then
+    # shellcheck disable=SC1090
+    set +e  # don't let unrelated lines (aliases, completions) kill us
+    source "$HOME/.zshrc" 2>/dev/null
+    set -e
+fi
+
 CAPITAL=${EDITH_CAPITAL:-10000000}
 TODAY=$(date '+%Y-%m-%d')
+
+if [ -z "${KRX_ID:-}" ] || [ -z "${KRX_PW:-}" ]; then
+    echo "⚠️  KRX_ID/KRX_PW 환경변수 미설정 — 외인 매수 booster가 비활성화됩니다."
+fi
 
 echo "🦸 EDITH Step 1/4: 시그널 산출 (capital=${CAPITAL})"
 ./venv/bin/python scripts/daily_signal.py --capital "${CAPITAL}"

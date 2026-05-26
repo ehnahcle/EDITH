@@ -24,7 +24,10 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from edith.final_strategy import final_strategy, FINAL_PARAMS_MOMENTUM
+from edith.final_strategy import (
+    final_strategy, FINAL_PARAMS_MOMENTUM,
+    PARAMS_STRONG_BULL, PARAMS_WEAK, PARAMS_BEAR,
+)
 from edith.metrics import summarize
 
 
@@ -128,11 +131,23 @@ def _try_import_fdr():
 @st.cache_data(ttl=60 * 15)
 def load_final_equity() -> dict[str, pd.Series]:
     out = {}
+    # New live strategy: Triple-mode + WEAK foreign booster (B_BoostWEAK_w0.5).
+    # Triple_full = same dispatcher without the foreign booster (apples-to-apples).
+    live_curves = [
+        ("Triple+Booster (LIVE)", "booster_equity_B_BoostWEAK_w0.5.csv"),
+        ("Triple_full (no booster)", "triple_equity_Triple_full.csv"),
+    ]
+    for label, fname in live_curves:
+        p = RESULTS_DIR / fname
+        if p.exists():
+            s = pd.read_csv(p, index_col=0, parse_dates=True)["equity"]
+            out[label] = s
+    # Legacy single-strategy curves (2020-2026 only — strong-bull-biased sample).
     for name in ["Momentum5_tuned", "NewHigh52w_tuned", "Ensemble_M+NH"]:
         p = RESULTS_DIR / f"final_equity_{name}.csv"
         if p.exists():
             s = pd.read_csv(p, index_col=0, parse_dates=True)["equity"]
-            out[name] = s
+            out[f"Legacy: {name}"] = s
     # KOSPI buy & hold benchmark, normalised to 10M (skip on Cloud)
     if not IS_CLOUD:
         _, _, get_index = _try_import_fdr()
@@ -155,32 +170,81 @@ def load_final_equity() -> dict[str, pd.Series]:
 @st.cache_data(ttl=60 * 15)
 def load_final_trades() -> dict[str, pd.DataFrame]:
     out = {}
+    live_trades = [
+        ("Triple+Booster (LIVE)", "booster_trades_B_BoostWEAK_w0.5.csv"),
+        ("Triple_full (no booster)", "triple_trades_Triple_full.csv"),
+    ]
+    for label, fname in live_trades:
+        p = RESULTS_DIR / fname
+        if p.exists():
+            out[label] = pd.read_csv(p, parse_dates=["entry_date", "exit_date"])
     for name in ["Momentum5_tuned", "NewHigh52w_tuned", "Ensemble_M+NH"]:
         p = RESULTS_DIR / f"final_trades_{name}.csv"
         if p.exists():
             df = pd.read_csv(p, parse_dates=["entry_date", "exit_date"])
-            out[name] = df
+            out[f"Legacy: {name}"] = df
     return out
 
 
 @st.cache_data(ttl=60 * 15)
 def load_final_summary() -> pd.DataFrame:
-    p = RESULTS_DIR / "final_summary.csv"
-    if not p.exists():
+    """Live booster summary (long-format) reshaped to wide for the Performance
+    table. Includes Legacy 2020-2026 rows for comparison."""
+    rows = []
+    p_b = RESULTS_DIR / "foreign_booster_summary.csv"
+    if p_b.exists():
+        df = pd.read_csv(p_b)
+        # period column has format "B_BoostWEAK_w0.5 FULL  2010-2024"
+        for _, r in df.iterrows():
+            tag = str(r["period"]).strip()
+            # Keep only FULL rows (single-line view); IS/OOS shown separately later.
+            if " FULL " in tag:
+                strategy_part = tag.split(" FULL ")[0].strip()
+                if strategy_part.startswith("B_BoostWEAK_w0.5"):
+                    label = "Triple+Booster (LIVE)"
+                elif strategy_part.startswith("A_Baseline"):
+                    label = "Triple_full (no booster)"
+                elif strategy_part.startswith("KOSPI_BH"):
+                    label = "KOSPI B&H (2010-2024)"
+                else:
+                    continue
+                rows.append({
+                    "Strategy": label,
+                    "CAGR": r["CAGR"],
+                    "Sharpe": r["Sharpe"],
+                    "Sortino": r["Sortino"],
+                    "MDD": r["MDD"],
+                    "Final": r["Final"],
+                    "N_trades": r["N_trades"],
+                    "WinRate": r["WinRate"],
+                    "ProfitFactor": r["ProfitFactor"],
+                })
+    # Append legacy rows for comparison (different sample window).
+    p_old = RESULTS_DIR / "final_summary.csv"
+    if p_old.exists():
+        df_old = pd.read_csv(p_old)
+        df_old["Strategy"] = "Legacy: " + df_old["Strategy"].astype(str) + " (2020-26)"
+        cols_keep = ["Strategy", "CAGR", "Sharpe", "Sortino", "MDD", "Final",
+                     "N_trades", "WinRate", "ProfitFactor"]
+        for c in cols_keep:
+            if c not in df_old.columns:
+                df_old[c] = None
+        rows.extend(df_old[cols_keep].to_dict("records"))
+    if not rows:
         return pd.DataFrame()
-    return pd.read_csv(p, index_col=0)
+    return pd.DataFrame(rows).set_index("Strategy")
 
 
-def _load_latest_cached_signals() -> tuple[pd.DataFrame, str | None]:
+def _load_latest_cached_signals() -> tuple[pd.DataFrame, str | None, datetime | None]:
     """Read the most recently committed signals_YYYY-MM-DD.csv from results/.
-    Returns (df, filename) or (empty_df, None)."""
+    Returns (df, filename, mtime) or (empty_df, None, None)."""
     files = sorted(glob.glob(str(RESULTS_DIR / "signals_*.csv")), reverse=True)
     if not files:
-        return pd.DataFrame(), None
+        return pd.DataFrame(), None, None
     latest = files[0]
     df = pd.read_csv(latest, dtype={"code": str})
-    # Re-derive display columns the script saved
-    return df, Path(latest).name
+    mtime = datetime.fromtimestamp(Path(latest).stat().st_mtime)
+    return df, Path(latest).name, mtime
 
 
 def _load_cached_regime_series() -> pd.Series:
@@ -240,9 +304,10 @@ REGIME3_INFO = {
 
 @st.cache_data(ttl=60 * 5)
 def compute_today_signals(capital: float, top_n: int, force: bool, allow_live: bool):
-    """Returns (today_regime: bool|None, regime_series: pd.Series, signals_df: pd.DataFrame, source: str).
+    """Returns (today_regime, regime_series, signals_df, source, data_time).
 
-    `source` is 'live' (recomputed now) or 'cache' (read from committed CSV).
+    `source` is 'live' (recomputed now) or 'cache:<fname>' (read from committed CSV).
+    `data_time` is when the data was fetched (live: now / cache: file mtime).
     On Streamlit Cloud we ALWAYS prefer the cache to avoid network/IP issues.
     """
     end = datetime.today().strftime("%Y-%m-%d")
@@ -279,6 +344,7 @@ def compute_today_signals(capital: float, top_n: int, force: bool, allow_live: b
                             "max_hold": int(last["max_hold"]),
                             "signal_date": sig.index[-1],
                         })
+                    live_time = datetime.now()
                     if candidates:
                         df_live = pd.DataFrame(candidates).sort_values("ret5d", ascending=False).head(top_n)
                         per_slot = capital / top_n
@@ -286,17 +352,17 @@ def compute_today_signals(capital: float, top_n: int, force: bool, allow_live: b
                         df_live["shares"] = (df_live["alloc_krw"] / df_live["close"]).astype(int)
                         df_live["stop_price"] = (df_live["close"] * (1 - df_live["stop_pct"])).round().astype(int)
                         df_live["target_price"] = (df_live["close"] * (1 + df_live["target_pct"])).round().astype(int)
-                        return today_regime, regime, df_live, "live"
-                    return today_regime, regime, pd.DataFrame(), "live"
+                        return today_regime, regime, df_live, "live", live_time
+                    return today_regime, regime, pd.DataFrame(), "live", live_time
         except Exception as e:  # noqa: BLE001
             st.info(f"실시간 데이터 수집 실패 ({type(e).__name__}). 가장 최근 캐시된 시그널을 사용합니다.")
 
     # --- Cache fallback path (used on Cloud or when live fails) ---
-    df_cached, fname = _load_latest_cached_signals()
+    df_cached, fname, mtime = _load_latest_cached_signals()
     regime = _load_cached_regime_series()
     today_regime = bool(regime.iloc[-1]) if not regime.empty else None
     if df_cached.empty:
-        return today_regime, regime, pd.DataFrame(), "none"
+        return today_regime, regime, pd.DataFrame(), "none", mtime
 
     # Recompute sizing using the user-specified capital + top_n
     df_cached = df_cached.head(top_n).copy()
@@ -306,7 +372,7 @@ def compute_today_signals(capital: float, top_n: int, force: bool, allow_live: b
         df_cached["shares"] = (df_cached["alloc_krw"] / df_cached["close"]).astype(int)
         df_cached["stop_price"] = (df_cached["close"] * (1 - df_cached.get("stop_pct", 0.03))).round().astype(int)
         df_cached["target_price"] = (df_cached["close"] * (1 + df_cached.get("target_pct", 0.15))).round().astype(int)
-    return today_regime, regime, df_cached, f"cache:{fname}"
+    return today_regime, regime, df_cached, f"cache:{fname}", mtime
 
 
 @st.cache_data(ttl=60 * 60)
@@ -358,16 +424,31 @@ if IS_CLOUD:
 hdr1, hdr2, hdr3 = st.columns([2, 1, 1])
 with hdr1:
     st.title("EDITH")
-    st.caption(f"KR Short-term Trading · {datetime.today().strftime('%Y-%m-%d %H:%M')}")
+    st.caption(f"KR Short-term Trading · Triple-Mode + Foreign Booster · {datetime.today().strftime('%Y-%m-%d %H:%M')}")
+
+# Current live strategy = Triple-mode dispatcher + WEAK foreign booster (w=0.5)
+# These come from results/foreign_booster_summary.csv (B_BoostWEAK_w0.5 FULL row).
+LIVE_BACKTEST = {
+    "label": "Triple+Booster",
+    "cagr_full": 0.2060,   # 2010-2024 FULL CAGR
+    "sharpe_full": 0.96,   # 2010-2024 FULL Sharpe
+    "mdd_full": -0.274,    # 2010-2024 FULL MDD
+    "sharpe_oos_2024": 0.86,
+    "period": "2010-2024",
+}
 with hdr2:
-    summary = load_final_summary()
-    if not summary.empty and "Momentum5_tuned" in summary.index:
-        cagr = summary.loc["Momentum5_tuned", "CAGR"] * 100
-        st.metric("Backtest CAGR", f"{cagr:.1f}%")
+    st.metric(
+        f"Backtest CAGR ({LIVE_BACKTEST['period']})",
+        f"{LIVE_BACKTEST['cagr_full']*100:.1f}%",
+        help="Triple-Mode + WEAK Foreign Booster (w=0.5), 14년 walk-forward",
+    )
 with hdr3:
-    if not summary.empty and "Momentum5_tuned" in summary.index:
-        sh = summary.loc["Momentum5_tuned", "Sharpe"]
-        st.metric("Sharpe", f"{sh:.2f}")
+    st.metric(
+        "Sharpe",
+        f"{LIVE_BACKTEST['sharpe_full']:.2f}",
+        delta=f"2024 OOS {LIVE_BACKTEST['sharpe_oos_2024']:.2f}",
+        help="Full-sample Sharpe / 2024 OOS year",
+    )
 
 st.divider()
 
@@ -379,17 +460,43 @@ if page == "Today's Signals":
     st.subheader("📅 Today's Entry Candidates")
 
     with st.spinner("Loading signals..."):
-        regime_today, regime_series, sig_df, source = compute_today_signals(
+        regime_today, regime_series, sig_df, source, data_time = compute_today_signals(
             capital=capital, top_n=top_n, force=force_refresh, allow_live=allow_live
         )
 
-    # Source badge
+    # Source + freshness badge
+    now = datetime.now()
+    def _fmt_age(t: datetime | None) -> str:
+        if t is None:
+            return ""
+        delta = now - t
+        sec = int(delta.total_seconds())
+        if sec < 60:
+            return f"{sec}초 전"
+        if sec < 3600:
+            return f"{sec // 60}분 전"
+        if sec < 86400:
+            return f"{sec // 3600}시간 전"
+        return f"{sec // 86400}일 전"
+
     if source.startswith("cache:"):
         fname = source.split(":", 1)[1]
-        # Extract YYYY-MM-DD from filename
-        st.caption(f"📦 캐시된 시그널 사용 — `{fname}`")
+        if data_time is not None:
+            age = _fmt_age(data_time)
+            stale_emoji = "🟢" if (now - data_time).total_seconds() < 86400 else "🟡" if (now - data_time).total_seconds() < 86400 * 3 else "🔴"
+            st.caption(
+                f"📦 캐시된 시그널 — `{fname}` · "
+                f"{stale_emoji} 데이터 가져온 시각: **{data_time.strftime('%Y-%m-%d %H:%M:%S')}** ({age})"
+            )
+        else:
+            st.caption(f"📦 캐시된 시그널 사용 — `{fname}`")
     elif source == "live":
-        st.caption("🟢 실시간 데이터")
+        if data_time is not None:
+            st.caption(
+                f"🟢 실시간 데이터 · 수집 시각: **{data_time.strftime('%Y-%m-%d %H:%M:%S')}** ({_fmt_age(data_time)})"
+            )
+        else:
+            st.caption("🟢 실시간 데이터")
     elif source == "none":
         st.warning("저장된 시그널이 없습니다. 로컬에서 `edith` 명령을 실행해 시그널을 생성하고 GitHub에 push하세요.")
         st.stop()
@@ -521,20 +628,27 @@ if page == "Today's Signals":
         st.markdown("""
 **Today's Signals** 페이지는 **전일 종가 데이터로 산출한 다음 거래일 매수 후보**를 보여줍니다.
 
-**상단 3개 카드:**
-- **KOSPI Regime**: 🟢 BULLISH면 신규 매수 허용, 🔴 BEARISH면 모든 신규 매수 금지 (보유분은 룰대로 관리)
-- **Regime ON (last 60d)**: 최근 60거래일 중 매수 가능 일수. 너무 적으면 (예: <10) 한동안 약세장이었다는 뜻
-- **Capital / slot**: 1포지션당 배분되는 금액 (좌측 사이드바 Capital ÷ Max positions)
+**상단 환경 카드 (Triple-Mode):** KOSPI 환경에 따라 자동으로 다른 전략이 활성화됩니다.
+- 🟢 **STRONG_BULL** → `Momentum5` (5일 +10% 모멘텀 · 손절 −3% / 익절 +15% / 보유 7일)
+- 🟡 **WEAK** → `NewHigh52w` (52주 신고가 돌파 · 손절 −7% / 익절 +20% / 보유 10일) — **메인 알파, 외인 매수 booster 적용**
+- 🔴 **BEAR** → `Disparity` (이격도 −10% 단기 반등 · 손절 −3% / 익절 +10% / 보유 3일) — 방어적
 
-**KOSPI Regime 차트:** 최근 60일간 매일 매수 허용 여부 (1=ON / 0=OFF). 약세장 진입/탈출 시점 파악용.
+**메트릭 카드:**
+- **Capital / slot**: 1포지션당 배분되는 금액 (좌측 사이드바 Capital ÷ Max positions)
+- **최근 60일 분포**: 🟢 STRONG_BULL / 🟡 WEAK / 🔴 BEAR 일수
+- **거래 가능?**: 환경별 진입 강도 (적극 / 제한 / 방어적)
+
+**KOSPI 환경 ribbon:** 최근 60일간 매일의 3-tier 분류. 환경 전환 시점 파악용.
 
 **후보 종목 표 컬럼:**
-- `5일수익률`: 최근 5거래일 가격 변화. 큰 순서로 정렬됨. 진입 우선순위 기준.
+- `신호점수`: 환경별 다른 정의 (STRONG_BULL=5일 수익률, WEAK=신고가 거리+외인 z-score 가산, BEAR=이격도). 큰 순서로 정렬.
 - `매수주수`: 다음날 시가에 실제로 발주할 주식 수
-- `손절가` / `목표가`: 매수 직후 HTS에 OCO 예약 등록할 가격 (각각 -3% / +15%)
-- `최대보유일`: 5거래일 안에 손절/익절 안 맞으면 그날 종가 시장가 청산
+- `손절가` / `목표가`: 매수 직후 HTS에 OCO 예약 등록할 가격 — **환경별로 값이 다름**
+- `최대보유일`: 도달 못 하면 그날 종가 시장가 청산 (STRONG_BULL 7일 / WEAK 10일 / BEAR 3일)
 
-**중요한 가정:** 실제 진입은 **다음 거래일 09:00 시가**입니다. 갭 상승(+5% 이상)이면 손절폭이 커지므로 그 종목은 스킵 권장.
+**외인 매수 booster (2026-05-22 도입):** WEAK 환경 한정으로 외인 5일 누적 순매수의 60일 z-score를 신호점수에 가산. 동일 점수대 후보 중 외인이 강한 종목 우선 선택. KRX 자격증명(`KRX_ID/KRX_PW`) 없으면 자동 비활성화.
+
+**진입 가정:** 실제 진입은 **다음 거래일 09:00 시가**. 갭 상승(+5% 이상)이면 손절폭이 커지므로 그 종목은 스킵 권장.
 
 자세한 운영 절차는 사이드바의 **Manual** 페이지 참조.
 """)
@@ -1016,7 +1130,7 @@ elif page == "Performance":
         st.stop()
 
     options = list(equities.keys())
-    default = [o for o in ["Momentum5_tuned", "KOSPI B&H"] if o in options]
+    default = [o for o in ["Triple+Booster (LIVE)", "Triple_full (no booster)", "KOSPI B&H"] if o in options]
     selected = st.multiselect("Curves", options=options, default=default)
 
     fig = go.Figure()
@@ -1072,13 +1186,14 @@ elif page == "Performance":
     st.divider()
     with st.expander("ℹ️ 이 페이지는 어떤 자료인가요?"):
         st.markdown("""
-**Performance** 페이지는 **2020-01 ~ 현재까지의 전체 백테스트 결과**를 보여줍니다.
+**Performance** 페이지는 **2014-03 ~ 2024-12 (실효 11년 walk-forward)** 백테스트 결과를 보여줍니다.
 
 **Equity Curve (위 차트):**
 - Y축 = 초기 자본 대비 배수. 1.0에서 시작.
-- `Momentum5_tuned`가 메인 전략 (실제 운용용)
-- `NewHigh52w_tuned`는 대안 전략, `Ensemble_M+NH`는 둘 합친 버전 — 참고용
-- `KOSPI B&H`는 KOSPI 지수를 사서 묻어두기만 한 경우. 우리 전략과의 alpha를 한눈에 비교
+- 🟢 **Triple+Booster (LIVE)** — 현재 운용 전략. 3-tier 디스패처 + WEAK regime 외인 매수 booster
+- ⚪ **Triple_full (no booster)** — booster 빠진 베이스라인 (booster 기여도 시각화용)
+- ⚪ **KOSPI B&H** — KOSPI 지수 매수 후 보유. alpha 비교용
+- 🔴 **Legacy: …** — 옛 단일 전략 결과 (2020-2026 강세장 표본만, 박스권 검증 없음 → **실제 운용 기준 아님**)
 
 **Drawdown 차트:** 각 시점에서 직전 고점 대비 얼마나 빠졌는지(%). 0이 고점 갱신 중, 음수가 깊을수록 아픈 시기. **MDD(최대 손실폭)** = 차트의 가장 깊은 골짜기.
 
@@ -1086,11 +1201,10 @@ elif page == "Performance":
 - `CAGR`: 연복리 수익률
 - `Sharpe`: 위험 대비 수익 (1 이상이면 우수, 2 이상은 매우 우수)
 - `Sortino`: 하방 변동성만 고려한 Sharpe
-- `Calmar`: CAGR ÷ |MDD|. 손실 1% 감당할 때마다 얻는 수익
 - `MDD`: 백테스트 기간 최대 손실폭 (음수)
 - `ProfitFactor`: 총 이익 ÷ 총 손실 (>1이면 흑자)
 
-**Yearly returns:** 각 전략의 연도별 수익률 히트맵. 초록=수익 / 빨강=손실. **2022년 EDITH가 0%인 건 KOSPI 레짐 OFF로 거래 자체를 안 했기 때문 — 이게 약세장 방어의 핵심 메커니즘.**
+**Yearly returns:** 각 전략의 연도별 수익률 히트맵. 초록=수익 / 빨강=손실. **약세장(2022, 2024)에서도 손실이 작거나 양수인 것이 Triple-Mode의 핵심 — BEAR 환경에서 Disparity로 제한 가동, WEAK에서 외인 booster로 진짜 알파 종목만 선별.**
 """)
 
 
@@ -1104,7 +1218,9 @@ elif page == "Trades":
         st.warning("No trade logs found.")
         st.stop()
 
-    strat = st.selectbox("Strategy", options=list(trades_map.keys()))
+    options = list(trades_map.keys())
+    default_idx = options.index("Triple+Booster (LIVE)") if "Triple+Booster (LIVE)" in options else 0
+    strat = st.selectbox("Strategy", options=options, index=default_idx)
     df = trades_map[strat]
 
     c1, c2, c3, c4 = st.columns(4)
@@ -1140,20 +1256,22 @@ elif page == "Trades":
         st.markdown("""
 **Trades** 페이지는 **백테스트에서 발생한 모든 매매 1건 1건**을 보여줍니다. 실제 거래가 아니라 **시뮬레이션 기록**입니다.
 
+**전략 선택:** `Triple+Booster (LIVE)`가 현재 운용 전략. Legacy 옵션은 옛 단일 전략 기록(2020-2026 표본).
+
 **상단 4개 카드:**
-- `Trades`: 백테스트 전체 기간 거래 수 (Momentum5는 약 1,500건)
-- `Win rate`: 익절·시간청산 중 수익으로 끝난 비율 (모멘텀 전략 특성상 30% 내외, 정상)
+- `Trades`: 백테스트 전체 기간 거래 수 (Triple+Booster는 11년간 약 1,340건)
+- `Win rate`: 익절·시간청산 중 수익으로 끝난 비율 (Triple+Booster ~37%)
 - `Avg P&L`: 거래 1건당 평균 손익률. 0보다 크면 흑자 시스템
 - `Total P&L`: 모든 거래 손익률 단순 합산 (참고용)
 
-**Exit reasons 도넛:**
-- `stop`: -3% 손절로 끝난 거래 (가장 많음, 70%+가 정상)
-- `target`: +15% 익절로 끝난 거래 (전체의 ~15%, 적지만 큰 수익)
-- `time`: 5거래일 만기로 끝난 거래 (나머지)
+**Exit reasons 도넛:** 환경별 손절·익절 폭이 다르므로 분포도 환경 비중에 따라 달라짐.
+- `stop`: 손절 (STRONG_BULL −3% / WEAK −7% / BEAR −3%)
+- `target`: 익절 (STRONG_BULL +15% / WEAK +20% / BEAR +10%)
+- `time`: 시간 청산 (STRONG_BULL 7일 / WEAK 10일 / BEAR 3일)
 
-> 모멘텀 전략의 핵심: **손절은 많고 작게, 익절은 적고 크게**. 비대칭 R:R로 흑자 유지.
+> 핵심: **손절은 많고 작게, 익절은 적고 크게**. 비대칭 R:R로 흑자 유지. WEAK regime에서 외인 booster가 동일 후보 중 진짜 알파를 골라내 평균 손익률을 끌어올림.
 
-**P&L distribution 히스토그램:** 거래 1건당 손익률 분포. -3%에 큰 막대(손절), +15% 부근에 작은 막대(익절), 가운데에 시간청산 분포가 보임.
+**P&L distribution 히스토그램:** 거래 1건당 손익률 분포. 손절 부근(−3 ~ −7%)에 큰 막대, 익절 부근(+10 ~ +20%)에 작은 막대, 가운데에 시간청산 분포.
 
 **Recent trades 표:**
 - `entry_date` / `exit_date`: 매수일 / 매도일
@@ -1166,12 +1284,32 @@ elif page == "Trades":
 # Page: Strategy Stats
 # ============================================================
 elif page == "Strategy Stats":
-    st.subheader("🎯 Strategy Stats — Momentum5_tuned")
+    st.subheader("🎯 Strategy Stats — Triple+Booster (LIVE)")
     trades_map = load_final_trades()
-    df = trades_map.get("Momentum5_tuned")
-    if df is None:
-        st.warning("Trades CSV not found.")
+    df = trades_map.get("Triple+Booster (LIVE)")
+    if df is None or df.empty:
+        st.warning("Live trades CSV not found. Run `scripts/run_foreign_booster_validation.py`.")
         st.stop()
+
+    # ---- Per-regime walk-forward summary (foreign_booster_summary.csv) ----
+    p_b = RESULTS_DIR / "foreign_booster_summary.csv"
+    if p_b.exists():
+        st.markdown("##### Walk-forward by period (B_BoostWEAK_w0.5)")
+        bs = pd.read_csv(p_b)
+        bs = bs[bs["period"].str.startswith("B_BoostWEAK_w0.5")].copy()
+        bs["window"] = bs["period"].str.replace("B_BoostWEAK_w0.5", "").str.strip()
+        bs_show = bs[["window", "CAGR", "Sharpe", "MDD", "WinRate", "ProfitFactor", "N_trades"]].set_index("window")
+        st.dataframe(
+            bs_show.style.format({
+                "CAGR": "{:.2%}", "Sharpe": "{:.2f}", "MDD": "{:.2%}",
+                "WinRate": "{:.1%}", "ProfitFactor": "{:.2f}", "N_trades": "{:.0f}",
+            }),
+            use_container_width=True,
+        )
+        st.caption("IS 2010-2018 (박스권) / OOS_A 2019-2023 / OOS_B 2024 약세장. "
+                   "OOS_B Sharpe 0.86이 외인 booster의 핵심 기여.")
+
+    st.divider()
 
     df["month"] = df["exit_date"].dt.to_period("M").astype(str)
     monthly = df.groupby("month")["pnl_pct"].sum()
@@ -1197,28 +1335,33 @@ elif page == "Strategy Stats":
     st.dataframe(yt.style.format(fmt), use_container_width=True)
 
     # Hold day distribution
-    fig_h = px.histogram(df, x="hold_days", nbins=10, title="Hold days distribution")
+    fig_h = px.histogram(df, x="hold_days", nbins=12, title="Hold days distribution")
     fig_h.update_layout(height=260, margin=dict(l=10, r=10, t=40, b=10))
     st.plotly_chart(fig_h, use_container_width=True)
 
     st.divider()
     with st.expander("ℹ️ 이 페이지는 어떤 자료인가요?"):
         st.markdown("""
-**Strategy Stats** 페이지는 **Momentum5_tuned (메인 전략) 한정**으로 패턴 분석을 보여줍니다.
+**Strategy Stats** 페이지는 **Triple+Booster (현재 운용 전략) 한정**으로 패턴 분석을 보여줍니다.
+
+**Walk-forward 표:** 14년 기간을 3구간으로 나눠 본 성과.
+- **IS 2010-2018**: 박스권 기간 (in-sample, 파라미터 튜닝 구간)
+- **OOS_A 2019-2023**: 첫 out-of-sample. Sharpe ~1.14
+- **OOS_B 2024**: 가장 약했던 해 (KOSPI −10%). Sharpe 0.86 — 외인 booster 기여 최대
 
 **Monthly P&L 막대그래프:**
 - 각 월의 모든 거래 손익률을 단순 합산. 초록=수익월, 빨강=손실월.
-- 한 종목당 200만원 × 약 1.5건/월 매매 가정하면, 막대 1% ≈ 약 3만원 실손익 규모.
+- 한 종목당 200만원 × 평균 8건/월 매매 가정하면, 막대 1% ≈ 약 1.5만원 실손익 규모.
 - 연속 빨강 막대가 3개월 이상이면 **전략이 깨졌는지 점검 시그널**.
 
 **Yearly trade stats 표:**
-- `Trades`: 그 해의 매매 횟수. 0이면 KOSPI 레짐이 거의 OFF였던 해 (예: 2022).
-- `WinRate`: 그 해 승률. 25~35% 사이가 정상.
+- `Trades`: 그 해의 매매 횟수. 환경 비중에 따라 변동 (BEAR 비중 큰 해는 적음).
+- `WinRate`: 그 해 승률. 30~40% 사이가 정상 (Triple+Booster 평균 37%).
 - `Sum P&L`: 그 해 모든 거래 손익률 합. 50% 이상이면 강세장 + 좋은 시그널 매칭.
 
 **Hold days distribution:**
-- 매매 1건이 며칠 만에 끝났는지 분포. 대부분 1-2일 (손절 빨리 맞음).
-- 5일 막대가 크면 시간청산이 많다는 뜻 (목표가 도달은 못 했지만 손절도 안 맞아 횡보).
+- 매매 1건이 며칠 만에 끝났는지 분포. 손절 빨리 맞은 1-3일 거래가 다수.
+- 환경별 최대 보유일이 달라 분포에 3·7·10일 부근 peak가 보일 수 있음.
 """)
 
 
@@ -1226,38 +1369,61 @@ elif page == "Strategy Stats":
 # Page: Config
 # ============================================================
 elif page == "Config":
-    st.subheader("⚙️ Strategy Configuration")
+    st.subheader("⚙️ Strategy Configuration — Triple-Mode + Foreign Booster")
+    st.caption("KOSPI 환경별로 다른 sub-strategy + 파라미터가 자동 활성화됩니다.")
+
+    st.markdown("##### Per-regime sub-strategies")
+    regime_rows = [
+        {
+            "환경": "🟢 STRONG_BULL",
+            "전략": "Momentum5",
+            "진입 조건": f"5일 수익률 ≥ {PARAMS_STRONG_BULL['ret_thresh']*100:.0f}%, Close > SMA20, Vol > MA20",
+            "손절": f"−{PARAMS_STRONG_BULL['stop_pct']*100:.0f}%",
+            "익절": f"+{PARAMS_STRONG_BULL['target_pct']*100:.0f}%",
+            "최대보유": f"{PARAMS_STRONG_BULL['max_hold']}d",
+        },
+        {
+            "환경": "🟡 WEAK",
+            "전략": "NewHigh52w ⭐",
+            "진입 조건": f"{PARAMS_WEAK['lookback']}일 신고가 돌파 (vol_mult={PARAMS_WEAK['vol_mult']})",
+            "손절": f"−{PARAMS_WEAK['stop_pct']*100:.0f}%",
+            "익절": f"+{PARAMS_WEAK['target_pct']*100:.0f}%",
+            "최대보유": f"{PARAMS_WEAK['max_hold']}d",
+        },
+        {
+            "환경": "🔴 BEAR",
+            "전략": "Disparity",
+            "진입 조건": f"이격도 ≤ {PARAMS_BEAR['thresh']*100:.0f}% (SMA20 대비)",
+            "손절": f"−{PARAMS_BEAR['stop_pct']*100:.0f}%",
+            "익절": f"+{PARAMS_BEAR['target_pct']*100:.0f}%",
+            "최대보유": f"{PARAMS_BEAR['max_hold']}d",
+        },
+    ]
+    st.dataframe(pd.DataFrame(regime_rows), use_container_width=True, hide_index=True)
+
+    st.markdown("##### Regime classification (KOSPI index)")
+    st.markdown("""
+- **STRONG_BULL**: Close > SMA200 AND SMA50 > SMA200 AND SMA50 slope > 2% (20d) AND ROC60 > 3%
+- **BEAR**: Close < SMA200 OR SMA50 < SMA200
+- **WEAK**: 그 외 (sideways or weak trend)
+""")
+
+    st.markdown("##### Foreign net-buy score booster (WEAK only ⭐)")
+    st.markdown("""
+- 입력: KRX 일별 외국인 순매수 (KRW), pykrx
+- 변환: 5일 누적의 60일 z-score를 clip(−2, +2) × weight=0.5
+- 적용: WEAK regime 진입 신호의 score에 ADD (entry는 차단 안 함, 순위만 재조정)
+- 효과: max_positions=5에서 동시 후보 중 외인이 강한 종목 우선 선택
+- 의존성: `KRX_ID` / `KRX_PW` 환경변수. 미설정 시 자동 비활성화 (baseline fallback).
+""")
 
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown("**Entry conditions (all must be true)**")
-        st.markdown(f"""
-- 5-day return ≥ **{FINAL_PARAMS_MOMENTUM['ret_thresh']*100:.0f}%**
-- Close > 20-day SMA (uptrend confirm)
-- Volume > 20-day Volume MA (interest confirm)
-- KOSPI regime ON (Close > SMA200 & SMA50 rising)
-""")
-        st.markdown("**Exit rules (first-touch wins)**")
-        st.markdown(f"""
-- Stop-loss: −**{FINAL_PARAMS_MOMENTUM['stop_pct']*100:.0f}%** (intraday low touch)
-- Take-profit: +**{FINAL_PARAMS_MOMENTUM['target_pct']*100:.0f}%** (intraday high touch)
-- Time exit: **{FINAL_PARAMS_MOMENTUM['max_hold']}** bars hold
-""")
-
-    with c2:
         st.markdown("**Universe**")
         st.markdown(f"""
 - KOSPI top **{N_KOSPI}** by market cap
 - KOSDAQ top **{N_KOSDAQ}** by market cap
 - ETF / SPAC / preferred excluded
-""")
-        st.markdown("**Cost model**")
-        st.markdown("""
-- Buy fee: 0.015%
-- Sell fee: 0.015%
-- Securities transaction tax (sell): 0.18%
-- Slippage: 0.10% per side
-- Round-trip ≈ 0.42%
 """)
         st.markdown("**Sizing**")
         st.markdown(f"""
@@ -1265,30 +1431,43 @@ elif page == "Config":
 - Max positions: configurable (default 5)
 - Allocation: equal weight per slot
 """)
+    with c2:
+        st.markdown("**Cost model (2025+ KR market)**")
+        st.markdown("""
+- Buy fee: 0.015%
+- Sell fee: 0.015% + 거래세 0.18%
+- Slippage: 0.10% per side
+- Round-trip ≈ 0.42%
+""")
+        st.markdown("**Backtest sample**")
+        st.markdown("""
+- 2014-03 ~ 2024-12 (실효 11년)
+- 150종목 (KOSPI top100 + KOSDAQ top50)
+- Walk-forward: IS 2010-2018 / OOS_A 2019-2023 / OOS_B 2024
+""")
 
     st.divider()
     st.markdown("##### Files")
     st.code(f"""
-Backtest:   ./venv/bin/python scripts/run_final.py
-Tune:       ./venv/bin/python scripts/run_tuning.py
-Signals:    ./venv/bin/python scripts/daily_signal.py --capital {capital:,.0f}
-Dashboard:  ./venv/bin/streamlit run dashboard.py
+Daily signal:   ./venv/bin/python scripts/daily_signal.py --capital {capital:,.0f}
+Triple-mode:    ./venv/bin/python scripts/run_triple_mode_validation.py
+Booster:        ./venv/bin/python scripts/run_foreign_booster_validation.py
+Tune:           ./venv/bin/python scripts/run_tuning.py
+Dashboard:      ./venv/bin/streamlit run dashboard.py
     """)
 
     st.divider()
     with st.expander("ℹ️ 이 페이지는 어떤 자료인가요?"):
         st.markdown("""
-**Config** 페이지는 **현재 운용 중인 전략의 모든 설정값**을 한눈에 보여줍니다.
+**Config** 페이지는 **현재 운용 중인 Triple-Mode 전략의 모든 설정값**을 한눈에 보여줍니다.
 
-**Entry conditions:** 매수 신호가 발생하기 위해 동시에 만족해야 하는 4가지 조건. 한 개라도 빠지면 신호 안 남.
+**Per-regime sub-strategies 표:** 환경별 전략·진입조건·손절/익절/보유일. 매일 KOSPI 분류 결과에 따라 자동으로 한 줄이 활성화됨.
 
-**Exit rules:** 매수 후 청산 트리거. 셋 중 가장 먼저 도달하는 것으로 청산.
+**Regime classification:** KOSPI 일봉으로 3-tier 분류하는 규칙. 15년 평균 STRONG_BULL ~19% / WEAK ~28% / BEAR ~52%.
 
-**Universe:** 매일 신호 산출 대상 종목 풀. KOSPI 시가총액 상위 100 + KOSDAQ 상위 50 = 총 150종목. ETF, 스팩, 우선주는 자동 제외.
+**Foreign booster:** WEAK 한정 외인 매수 가산점. STRONG_BULL에 적용하면 오히려 성과 악화(검증 완료) → WEAK ONLY 고정.
 
-**Cost model:** 백테스트에 반영된 거래 비용. 실제 사용자 계좌의 수수료가 더 우대(예: 0.0036%)면 백테스트는 보수적 → 실제 수익이 더 클 가능성.
+**Cost model:** 백테스트에 반영된 거래 비용. 실제 사용자 계좌 수수료가 더 우대면 백테스트는 보수적 → 실제 수익이 더 클 가능성.
 
-**Sizing:** 자본을 어떻게 나눠 매수하는지. 사이드바에서 변경하면 즉시 반영.
-
-**Files 박스:** 터미널에서 실행할 명령어. 자세한 운영은 [OPS.md](OPS.md), 빠른 단축어는 `edith` / `edith-ui` (`~/.zshrc` 참조).
+**Files 박스:** 터미널에서 실행할 명령어. 빠른 단축어는 `edith` / `edith-ui` (`~/.zshrc` 참조).
 """)
