@@ -102,6 +102,7 @@ def make_dispatcher(
     enable_bear: bool = True,
     filter_per_regime: dict | None = None,
     score_booster_per_regime: dict | None = None,
+    weak_fn=None,
 ):
     """Return a signal_fn(code, df) that selects the per-regime sub-strategy
     based on the value of `regime3` on each date.
@@ -123,6 +124,10 @@ def make_dispatcher(
                        this is ADDED to the score column for the regime's entries.
                        Used to re-rank simultaneous candidates (engine fills only
                        max_positions slots, so score ordering is decisive).
+
+    weak_fn: optional signal_fn(code, df) to replace the WEAK sleeve's default
+                       NewHigh52w(**PARAMS_WEAK). STRONG_BULL and BEAR are untouched.
+                       Used to A/B different WEAK triggers (e.g. nearness variants).
     """
     regime3 = regime3.copy()
     filter_per_regime = filter_per_regime or {}
@@ -145,7 +150,7 @@ def make_dispatcher(
     def _dispatch(code: str, df: pd.DataFrame) -> pd.DataFrame:
         # Build all 3 sub-signals upfront, then mask by regime.
         sig_m = momentum_5d(code, df, **PARAMS_STRONG_BULL)
-        sig_n = new_high_52w(code, df, **PARAMS_WEAK)
+        sig_n = weak_fn(code, df) if weak_fn is not None else new_high_52w(code, df, **PARAMS_WEAK)
         sig_d = disparity_meanrev(code, df, **PARAMS_BEAR)
 
         # Align regime to this ticker's dates

@@ -73,8 +73,19 @@ def get_investor_flow(
     On any error returns an empty DataFrame (e.g. ETF/SPAC, delisted).
     """
     name = f"flow_{code}_{_to_krx_date(start)}_{_to_krx_date(end)}"
-    if not force and _cache_fresh(name):
-        return _load(name)
+    p = _cache_path(name)
+    end_historical = pd.Timestamp(end) < pd.Timestamp.now().normalize()
+
+    if not force and p.exists():
+        cached = _load(name)
+        # Immutable historical window with real data -> always trust the cache,
+        # ignoring the 24h TTL (the data for a past window never changes; a
+        # needless refetch only risks clobbering it on a transient failure).
+        if end_historical and cached is not None and not cached.empty:
+            return cached
+        # Live window (end >= today) -> honor the 24h freshness TTL.
+        if not end_historical and _cache_fresh(name):
+            return cached
 
     try:
         raw = stock.get_market_trading_value_by_date(
@@ -93,6 +104,14 @@ def get_investor_flow(
         keep = ["foreign_net", "inst_net", "retail_net", "other_corp_net"]
         out = out[[c for c in keep if c in out.columns]].astype("int64")
         out.index.name = "Date"
+
+    # Safety: never overwrite a populated cache with an empty fetch result
+    # (e.g. KRX auth failure). Losing real historical data to a transient
+    # error is far worse than serving slightly stale data.
+    if out.empty and p.exists():
+        prev = _load(name)
+        if prev is not None and not prev.empty:
+            return prev
 
     _save(name, out)
     return out

@@ -1,0 +1,2 @@
+pooled_corr_raw,pooled_corr_mcap,median_corr_raw,median_corr_mcap,gate,verdict_mcap
+-0.07984348546028357,-0.08159284949567551,-0.07077562186845197,-0.07048578822992663,0.6,PASS (proceed to weight grid)

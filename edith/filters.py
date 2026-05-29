@@ -89,6 +89,60 @@ def make_foreign_score_booster(
     return f
 
 
+def make_inst_score_booster(
+    flows_by_code: dict[str, pd.DataFrame],
+    lookback: int = 5,
+    zscore_window: int = 60,
+    weight: float = 1.0,
+    clip: tuple[float, float] = (-2.0, 2.0),
+):
+    """Additive score adjustment based on standardized INSTITUTIONAL net buying,
+    mcap-normalized.
+
+    Mirrors make_foreign_score_booster but (a) uses inst_net and (b) normalizes
+    the daily flow by Close before standardizing. mcap_t is ~proportional to
+    price_t under roughly constant shares, and any ticker-constant factor cancels
+    in the z-score, so inst_net/Close is a zero-extra-infra proxy for inst_net/mcap.
+    This deliberately differs from the foreign booster's raw-KRW recipe so the two
+    signals are not collinear (verified: foreign-z vs inst-z corr ~= -0.08).
+
+    Tickers missing from flows -> 0 (neutral).
+    """
+
+    def f(code: str, df: pd.DataFrame) -> pd.Series:
+        flow = flows_by_code.get(code)
+        if flow is None or flow.empty or "inst_net" not in flow.columns:
+            return pd.Series(0.0, index=df.index)
+        close = df["Close"].reindex(flow.index)
+        norm = flow["inst_net"] / close.replace(0, pd.NA)
+        cum = norm.rolling(lookback, min_periods=lookback).sum()
+        mu = cum.rolling(zscore_window, min_periods=zscore_window).mean()
+        sd = cum.rolling(zscore_window, min_periods=zscore_window).std()
+        z = ((cum - mu) / sd).clip(*clip)
+        adj = (weight * z).astype(float).fillna(0.0)
+        return adj.reindex(df.index).fillna(0.0)
+
+    return f
+
+
+def combine_boosters(*boosters):
+    """Compose several score boosters into one by summing their adjustments.
+
+    Each input booster already clips and weights its own z-score, so the sum
+    stays bounded (e.g. two w=0.5 boosters -> range +/-2.0). Missing/neutral
+    boosters contribute 0. Used to stack orthogonal signals (foreign + inst)
+    on the same regime sleeve.
+    """
+
+    def f(code: str, df: pd.DataFrame) -> pd.Series:
+        total = pd.Series(0.0, index=df.index)
+        for b in boosters:
+            total = total + b(code, df).reindex(df.index).fillna(0.0)
+        return total
+
+    return f
+
+
 def make_smart_money_filter(
     flows_by_code: dict[str, pd.DataFrame],
     lookback: int = 5,
