@@ -1,0 +1,3 @@
+code,name,board,close,score,stop_pct,target_pct,max_hold,signal_date,regime,alloc_krw,shares,stop_price,target_price,ret5d
+000500,가온전선,KOSPI,226000.0,0.2038048264928659,0.03,0.1,3,2026-10-23,BEAR,2000000.0,8,219220,248600,0.2038048264928659
+030530,원익홀딩스,KOSDAQ,22200.0,0.14103308183401042,0.03,0.1,3,2026-10-23,BEAR,2000000.0,90,21534,24420,0.14103308183401042
