@@ -1,0 +1,3 @@
+code,name,board,close,score,stop_pct,target_pct,max_hold,signal_date,regime,alloc_krw,shares,stop_price,target_price,ret5d
+131970,두산테스나,KOSDAQ,96100.0,0.12866080333665786,0.03,0.1,3,2026-10-29,BEAR,2000000.0,20,93217,105710,0.12866080333665786
+000500,가온전선,KOSPI,239500.0,0.1098308864523323,0.03,0.1,3,2026-10-29,BEAR,2000000.0,8,232315,263450,0.1098308864523323
